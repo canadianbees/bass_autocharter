@@ -1,28 +1,26 @@
 # separate.py
 
-from src.utils.path_utils import normalize_path
-
 import subprocess
 import librosa
-import shutil
 from pathlib import Path
 import sys
+
 
 def _get_audio_dir(base_output_dir: str) -> Path:
     audio_dir = Path(base_output_dir) / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
     return audio_dir
 
-def normalize_wav(input_path: str, output_dir: str) -> str:
+
+def normalize_wav(input_path: str, output_dir: str, filename: str = "audio.wav") -> str:
     """
-    Convert Demucs output into Wwise / Rocksmith-safe WAV:
-    - PCM 16-bit
-    - 44.1 kHz
-    - stereo
-    - simple output path
+    Convert audio into Wwise / Rocksmith-safe WAV:
+      - PCM 16-bit, 44.1kHz, stereo
+
+    filename param lets you produce full_mix.wav vs audio.wav without conflict.
     """
-    audio_dir = _get_audio_dir(output_dir)
-    output_path = audio_dir / "audio.wav"
+    audio_dir   = _get_audio_dir(output_dir)
+    output_path = audio_dir / filename
 
     result = subprocess.run([
         "ffmpeg", "-y",
@@ -37,23 +35,22 @@ def normalize_wav(input_path: str, output_dir: str) -> str:
 
     if result.returncode != 0:
         print(result.stderr)
-        raise RuntimeError("ffmpeg failed while normalizing bass stem")
+        raise RuntimeError(f"ffmpeg failed normalizing {input_path}")
 
     return str(output_path)
 
 
-def make_preview(input_path: str,  output_dir: str) -> str:
+def make_preview(input_path: str, output_dir: str) -> str:
     """
-    Create a Wwise / Rocksmith-safe preview WAV.
+    Create a Wwise / Rocksmith-safe 30-second preview WAV.
+    Starts at 30s in (or earlier for short songs).
     """
-    audio_dir = _get_audio_dir(output_dir)
+    audio_dir    = _get_audio_dir(output_dir)
     preview_path = audio_dir / "audio_preview.wav"
 
-    # get duration
-    duration = librosa.get_duration(filename=input_path)
-
-    # choose safe start time
-    start = min(30, max(0, duration - 30.0))
+    # Fixed: librosa 0.10+ requires path= not filename=
+    duration = librosa.get_duration(path=input_path)
+    start    = min(30, max(0, duration - 30.0))
 
     result = subprocess.run([
         "ffmpeg", "-y",
@@ -70,22 +67,21 @@ def make_preview(input_path: str,  output_dir: str) -> str:
 
     if result.returncode != 0:
         print(result.stderr)
-        raise RuntimeError("ffmpeg failed while generating preview audio")
+        raise RuntimeError("ffmpeg failed generating preview audio")
 
     return str(preview_path)
 
 
 def separate_bass(input_path: str, output_dir: str) -> tuple[str, str]:
     """
-    Runs Demucs on the input audio file and returns the path to the
-    normalized isolated bass stem WAV file.
+    Runs Demucs on the input audio and returns:
+      (normalized_bass_wav, preview_wav)
     """
     print("    Running Demucs — this takes 2-4 minutes on CPU...")
+    print(f"    Python: {sys.executable}")
 
     sanitized_path = Path(input_path)
     sanitized_name = sanitized_path.stem
-
-    print(f"Python being used: {sys.executable}")
 
     subprocess.run([
         sys.executable, "-m", "demucs",
@@ -105,7 +101,7 @@ def separate_bass(input_path: str, output_dir: str) -> tuple[str, str]:
 
     _validate_bass_stem(str(bass_wav_path))
 
-    fixed_bass_wav = normalize_wav(str(bass_wav_path), output_dir)
+    fixed_bass_wav = normalize_wav(str(bass_wav_path), output_dir, filename="audio.wav")
     _validate_bass_stem(fixed_bass_wav)
 
     preview_wav = make_preview(fixed_bass_wav, output_dir)
@@ -114,14 +110,11 @@ def separate_bass(input_path: str, output_dir: str) -> tuple[str, str]:
 
 
 def _validate_bass_stem(bass_wav_path: str):
-    """
-    Checks that the bass stem has actual audio content.
-    """
+    """Raise ValueError if the bass stem is nearly silent."""
     audio_samples, _ = librosa.load(bass_wav_path, sr=None, mono=True)
     rms_energy = librosa.feature.rms(y=audio_samples).mean()
-
     if rms_energy < 0.01:
         raise ValueError(
-            f"Bass stem is nearly silent (RMS energy = {rms_energy:.4f}). "
-            "This song may have no bass track, or the bass is too quiet to separate."
+            f"Bass stem is nearly silent (RMS={rms_energy:.4f}). "
+            "Song may have no detectable bass track."
         )

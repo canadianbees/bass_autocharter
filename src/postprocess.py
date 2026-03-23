@@ -1,98 +1,129 @@
 # postprocess.py
-# Cleans up common errors in the basic-pitch transcription before fretting.
-# basic-pitch isn't perfect — it makes predictable mistakes on bass audio
-# that we can catch and fix with simple rules.
+# Cleans up common errors in the aubio transcription before fretting.
+#
+# Input/output format: list of (start_sec, end_sec, midi_pitch) tuples
+# This is the native format from transcribe.py — no pretty_midi dependency.
 
-import pretty_midi
+BASS_MIDI_MIN = 28    # E1  — lowest note on standard 4-string bass
+BASS_MIDI_MAX = 55    # G3  — cap lower than before to kill octave errors
+MIN_NOTE_SEC  = 0.08  # 80ms minimum note duration
+MIN_GAP_SEC   = 0.04  # 40ms minimum gap between notes (supports sixteenth notes)
+MERGE_GAP_SEC = 0.02  # 20ms — same-pitch notes closer than this get merged
 
-BASS_MIDI_MIN = 28   # E1 — lowest note on a standard 4-string bass
-BASS_MIDI_MAX = 67   # G4 — highest practical note (fret 24 on G string)
-MIN_NOTE_GAP_MS = 80 # minimum gap between notes in milliseconds
 
-
-def postprocess_midi(midi: pretty_midi.PrettyMIDI) -> pretty_midi.PrettyMIDI:
+def postprocess_notes(notes: list[tuple]) -> list[tuple]:
     """
-    Runs all post-processing steps on the transcribed MIDI in order:
-      1. Clamp octave errors
-      2. Remove very short notes (noise)
-      3. Merge consecutive same-pitch notes with tiny gaps
-      4. Enforce minimum gap between notes (prevents game lag)
+    Runs all post-processing steps in order:
+      1. Remove simultaneous notes    — keep lowest pitch only (bass is monophonic)
+      2. Fix octave errors            — shift out-of-range notes into bass range
+      3. Remove short notes           — kills ghost notes and artifacts
+      4. Merge repeated notes         — fixes over-segmented sustained notes
+      5. Enforce minimum gap          — prevents RS2014 note density glitches
+
+    Input/output: list of (start_sec, end_sec, midi_pitch)
     """
-    instrument = midi.instruments[0]
-    instrument.notes = _fix_octave_errors(instrument.notes)
-    instrument.notes = _remove_short_notes(instrument.notes)
-    instrument.notes = _merge_repeated_notes(instrument.notes)
-    instrument.notes = _enforce_minimum_gap(instrument.notes)
+    notes = sorted(notes, key=lambda n: n[0])
+    notes = _remove_simultaneous(notes)
+    notes = _fix_octave_errors(notes)
+    notes = _remove_short_notes(notes)
+    notes = _merge_repeated_notes(notes)
+    notes = _enforce_minimum_gap(notes)
 
-    print(f"    After postprocessing: {len(instrument.notes)} notes")
-    return midi
+    print(f"    After postprocessing: {len(notes)} notes")
+    return notes
 
 
-def _fix_octave_errors(notes: list) -> list:
+# ── STEP 1: REMOVE SIMULTANEOUS NOTES ────────────────────────────────────────
+
+def _remove_simultaneous(notes: list[tuple]) -> list[tuple]:
     """
-    basic-pitch sometimes detects a note an octave too high or too low.
-    If a pitch is outside the playable bass range, shift it by octaves
-    until it lands in range.
-    """
-    fixed = []
-    for note in notes:
-        pitch = note.pitch
-        while pitch > BASS_MIDI_MAX:
-            pitch -= 12
-        while pitch < BASS_MIDI_MIN:
-            pitch += 12
-        note.pitch = pitch
-        fixed.append(note)
-    return fixed
-
-
-def _remove_short_notes(notes: list) -> list:
-    """
-    Remove notes shorter than 50ms — these are almost always
-    transcription artifacts rather than intentional notes.
-    """
-    return [note for note in notes if (note.end - note.start) >= 0.05]
-
-
-def _merge_repeated_notes(notes: list) -> list:
-    """
-    If the same pitch appears twice in a row with a gap smaller than 50ms,
-    merge them into a single longer note. This fixes cases where basic-pitch
-    splits one sustained note into two.
+    Bass is monophonic — only one note plays at a time.
+    If two notes start within 30ms of each other, keep only the lowest pitch
+    (most likely to be the real fundamental, not a harmonic).
     """
     if not notes:
         return notes
 
-    merged = [notes[0]]
-    for current_note in notes[1:]:
-        previous_note = merged[-1]
-        gap_seconds = current_note.start - previous_note.end
-        same_pitch   = current_note.pitch == previous_note.pitch
+    result = []
+    i = 0
+    while i < len(notes):
+        group = [notes[i]]
+        j = i + 1
+        while j < len(notes) and (notes[j][0] - notes[i][0]) < 0.03:
+            group.append(notes[j])
+            j += 1
+        result.append(min(group, key=lambda n: n[2]))
+        i = j
 
-        if same_pitch and gap_seconds < 0.05:
-            # Extend the previous note to cover the current one
-            previous_note.end = current_note.end
-        else:
-            merged.append(current_note)
-
-    return merged
+    return result
 
 
-def _enforce_minimum_gap(notes: list) -> list:
+# ── STEP 2: FIX OCTAVE ERRORS ─────────────────────────────────────────────────
+
+def _fix_octave_errors(notes: list[tuple]) -> list[tuple]:
     """
-    RS2014 can't handle more than ~12 notes per second without glitching.
-    If two consecutive notes are closer than 80ms, drop the second one.
-    This prevents the game from lagging on dense transcription sections.
+    Shift notes outside the bass range up or down by octaves until in range.
+    BASS_MIDI_MAX is set conservatively (G3) to catch the common case where
+    the detector picks up an overtone an octave above the real note.
+    """
+    fixed = []
+    for start, end, pitch in notes:
+        while pitch > BASS_MIDI_MAX:
+            pitch -= 12
+        while pitch < BASS_MIDI_MIN:
+            pitch += 12
+        fixed.append((start, end, pitch))
+    return fixed
+
+
+# ── STEP 3: REMOVE SHORT NOTES ────────────────────────────────────────────────
+
+def _remove_short_notes(notes: list[tuple]) -> list[tuple]:
+    """
+    Remove notes shorter than MIN_NOTE_SEC.
+    Anything under 80ms is almost certainly a detection artifact.
+    """
+    return [(s, e, p) for s, e, p in notes if (e - s) >= MIN_NOTE_SEC]
+
+
+# ── STEP 4: MERGE REPEATED NOTES ──────────────────────────────────────────────
+
+def _merge_repeated_notes(notes: list[tuple]) -> list[tuple]:
+    """
+    If the same pitch appears twice in a row with a gap smaller than 20ms,
+    merge them into one longer note.
+    Fixes over-segmented sustained notes without touching intentional repeats.
+    """
+    if not notes:
+        return notes
+
+    merged = [list(notes[0])]
+    for start, end, pitch in notes[1:]:
+        prev = merged[-1]
+        gap  = start - prev[1]
+        if pitch == prev[2] and gap < MERGE_GAP_SEC:
+            prev[1] = end       # extend previous note's end time
+        else:
+            merged.append([start, end, pitch])
+
+    return [tuple(n) for n in merged]
+
+
+# ── STEP 5: ENFORCE MINIMUM GAP ───────────────────────────────────────────────
+
+def _enforce_minimum_gap(notes: list[tuple]) -> list[tuple]:
+    """
+    RS2014 glitches with notes closer than ~40ms.
+    If a note starts too soon after the previous one ends, drop it.
+    40ms supports sixteenth notes up to ~375 BPM — well above any bass line.
     """
     if not notes:
         return notes
 
     filtered = [notes[0]]
-    for current_note in notes[1:]:
-        previous_note = filtered[-1]
-        gap_ms = (current_note.start - previous_note.end) * 1000
-
-        if gap_ms >= MIN_NOTE_GAP_MS:
-            filtered.append(current_note)
+    for start, end, pitch in notes[1:]:
+        prev_end = filtered[-1][1]
+        if (start - prev_end) >= MIN_GAP_SEC:
+            filtered.append((start, end, pitch))
 
     return filtered
