@@ -1,0 +1,48 @@
+# ── Python ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# virtual envs
+venv310/
+.venv310/
+
+# ── OS / Editor ────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ── Logs ──────────────────────────────────────────────
+*.log
+
+# ── Generated Audio / ML Outputs ───────────────────────
+test_output/
+*.wav
+*.mp3
+*.ogg
+*.wem
+
+# Demucs output
+htdemucs/
+
+# ── Generated Data ─────────────────────────────────────
+*.mid
+*.midi
+*.xml
+*.psarc
+
+# ── Temporary / Cache ──────────────────────────────────
+tmp/
+temp/
+.cache/
+
+# ── Model / Large Files (optional) ─────────────────────
+*.ckpt
+*.pt
+*.pth
+
+# ── ffmpeg artifacts (if any)
+*.ffmpeg
