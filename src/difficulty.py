@@ -35,8 +35,4 @@ def simplify(notes, level):
 
 
 def generate_levels(full_notes):
-    return [
-        simplify(full_notes, 0),
-        simplify(full_notes, 1),
-        full_notes
-    ]
+    return [full_notes, full_notes, full_notes]

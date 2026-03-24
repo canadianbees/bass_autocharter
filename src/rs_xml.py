@@ -32,16 +32,6 @@ def notes_to_rs(
     note_tuples: list[tuple],
     fretting:    list[tuple],
 ) -> list[RSNote]:
-    """
-    Convert (start, end, pitch) tuples + fretting into RSNote objects.
-
-    note_tuples and fretting must be the same length — use
-    filter_notes_to_fretting() from fretting.py to guarantee this.
-
-    RS2014 string numbering is reversed from the fretting algorithm:
-      fretting:  0=E (lowest string) ... 3=G (highest)
-      RS2014:    0=G (highest)       ... 3=E (lowest)
-    """
     if len(note_tuples) != len(fretting):
         raise ValueError(
             f"notes_to_rs: length mismatch — "
@@ -51,7 +41,7 @@ def notes_to_rs(
 
     rs_notes = []
     for (start, end, pitch), (string_idx, fret) in zip(note_tuples, fretting):
-        rs_string = 3 - string_idx          # flip string order for RS2014
+        rs_string = string_idx  # RS bass: 0=E(low), 1=A, 2=D, 3=G — same as GP
         duration  = end - start
         sustain   = duration if duration > 0.1 else 0.0
 
@@ -78,27 +68,20 @@ def generate_arrangement_xml(
     album_year:  int = 0,
     arrangement: str = "Bass",
 ):
-    """
-    Generate a Rocksmith 2014 arrangement XML file.
-
-    song_length: total song duration in seconds
-    avg_tempo:   BPM — used for ebeat generation (set to actual song tempo)
-    """
     root      = ET.Element("song")
     root.set("version", "8")
     timestamp = datetime.utcnow().strftime("%m-%d-%Y %H:%M")
     internal  = _make_internal_name(song_name, arrangement)
 
-    # ── METADATA ──────────────────────────────────────────────────────────
     ET.SubElement(root, "title").text          = song_name
     ET.SubElement(root, "arrangement").text    = arrangement
     ET.SubElement(root, "part").text           = "1"
-    ET.SubElement(root, "offset").text         = "0"
+    ET.SubElement(root, "offset").text         = "0.000"
     ET.SubElement(root, "centOffset").text     = "0"
     ET.SubElement(root, "songLength").text     = f"{song_length:.3f}"
     ET.SubElement(root, "internalName").text   = internal
     ET.SubElement(root, "songNameSort").text   = song_name
-    ET.SubElement(root, "startBeat").text      = "0"
+    ET.SubElement(root, "startBeat").text      = "0.000"
     ET.SubElement(root, "averageTempo").text   = f"{avg_tempo:.3f}"
     ET.SubElement(root, "capo").text           = "0"
     ET.SubElement(root, "artistName").text     = artist
@@ -109,19 +92,16 @@ def generate_arrangement_xml(
     ET.SubElement(root, "crowdSpeed").text     = "1"
     ET.SubElement(root, "lastConversionDateTime").text = timestamp
 
-    # ── TUNING ────────────────────────────────────────────────────────────
     tuning = ET.SubElement(root, "tuning")
     for i in range(4):
         tuning.set(f"string{i}", "0")
 
-    # ── ARRANGEMENT PROPERTIES ────────────────────────────────────────────
     arr_props = ET.SubElement(root, "arrangementProperties")
     arr_props.set("pathBass",       "1")
     arr_props.set("standardTuning", "1")
     arr_props.set("represent",      "0")
     arr_props.set("sustain",        "1")
 
-    # ── TONES ─────────────────────────────────────────────────────────────
     for t in ("tonebase", "tonea", "toneb", "tonec", "toned", "tone_multiplayer"):
         ET.SubElement(root, t).text = ""
     ET.SubElement(root, "tones", count="0")
@@ -132,105 +112,91 @@ def generate_arrangement_xml(
     ET.SubElement(root, "chordTemplates", count="0")
     ET.SubElement(root, "fretHandMutes",  count="0")
 
-    # ── EBEATS ────────────────────────────────────────────────────────────
+    # Ebeats
     ebeats_el  = ET.SubElement(root, "ebeats")
     bar_starts = _generate_ebeats(ebeats_el, song_length, avg_tempo)
 
-    # ── PHRASES ───────────────────────────────────────────────────────────
+    # Phrases — COUNT, one per segment, END
     phrase_times = segment_phrases(rs_notes, bar_starts)
+    first_note   = rs_notes[0].time if rs_notes else 0.0
 
-    phrases_el = ET.SubElement(root, "phrases", count="1")
-    ET.SubElement(phrases_el, "phrase", name="main", maxDifficulty="2")
+    # Ensure no phrase starts at 0 (that's COUNT's slot) — shift to first note
+    phrase_times = [t if t > 0 else first_note for t in phrase_times]
+    phrase_times = sorted(set(phrase_times))
 
-    iters_el = ET.SubElement(root, "phraseIterations", count=str(len(phrase_times)))
-    for t in phrase_times:
+    # phrase 0 = COUNT, 1..N = main segments, last = END
+    n_main = len(phrase_times)
+    phrases_el = ET.SubElement(root, "phrases", count=str(n_main + 2))
+    ET.SubElement(phrases_el, "phrase", name="COUNT", maxDifficulty="0", disparity="0", ignore="0")
+    for _ in phrase_times:
+        ET.SubElement(phrases_el, "phrase", name="main", maxDifficulty="0", disparity="0", ignore="0")
+    ET.SubElement(phrases_el, "phrase", name="END", maxDifficulty="0", disparity="0", ignore="0")
+
+    end_phrase_id = str(n_main + 1)
+    iters_el = ET.SubElement(root, "phraseIterations", count=str(n_main + 2))
+    ET.SubElement(iters_el, "phraseIteration", time="0.000", phraseId="0", variation="")
+    for i, t in enumerate(phrase_times):
         ET.SubElement(iters_el, "phraseIteration",
-                      time=f"{t:.3f}", phraseId="0")
+                      time=f"{t:.3f}", phraseId=str(i + 1), variation="")
+    ET.SubElement(iters_el, "phraseIteration",
+                  time=f"{song_length - 0.5:.3f}", phraseId=end_phrase_id, variation="")
 
-    props_el = ET.SubElement(root, "phraseProperties", count="1")
-    ET.SubElement(props_el, "phraseProperty",
-                  phraseId="0", redundant="0", levelJump="0", empty="0")
+    ET.SubElement(root, "phraseProperties", count="0")
+    ET.SubElement(root, "newLinkedDiffs",   count="0")
+    ET.SubElement(root, "linkedDiffs",      count="0")
+    ET.SubElement(root, "sections",         count="0")
+    ET.SubElement(root, "events",           count="0")
+    ET.SubElement(root, "toneChanges",      count="0")
+    ET.SubElement(root, "controls",         count="0")
 
-    ET.SubElement(root, "newLinkedDiffs", count="0")
-    ET.SubElement(root, "linkedDiffs",    count="0")
+    # Single level — all notes
+    levels_el = ET.SubElement(root, "levels", count="1")
+    level_el  = ET.SubElement(levels_el, "level", difficulty="0")
+    notes_el  = ET.SubElement(level_el,  "notes", count=str(len(rs_notes)))
 
-    # ── SECTIONS ──────────────────────────────────────────────────────────
-    sections_el = ET.SubElement(root, "sections", count="2")
-    ET.SubElement(sections_el, "section",
-                  name="intro", number="1", startTime="0.0")
-    ET.SubElement(sections_el, "section",
-                  name="verse", number="1",
-                  startTime=f"{phrase_times[1] if len(phrase_times) > 1 else 5.0:.3f}")
+    for n in rs_notes:
+        note_el = ET.SubElement(notes_el, "note")
+        note_el.set("time",           f"{n.time:.3f}")
+        note_el.set("string",         str(n.string))
+        note_el.set("fret",           str(n.fret))
+        note_el.set("sustain",        f"{n.sustain:.3f}")
+        note_el.set("hammerOn",       "1" if n.hammer_on else "0")
+        note_el.set("pullOff",        "1" if n.pull_off  else "0")
+        note_el.set("vibrato",        "1" if n.vibrato   else "0")
+        note_el.set("slideTo",        str(n.slide_to))
+        note_el.set("bend",           f"{n.bend:.1f}")
+        note_el.set("linkNext",       "0")
+        note_el.set("accent",         "0")
+        note_el.set("harmonic",       "0")
+        note_el.set("ignore",         "0")
+        note_el.set("mute",           "0")
+        note_el.set("palmMute",       "0")
+        note_el.set("pluck",          "-1")
+        note_el.set("slap",           "-1")
+        note_el.set("slideUnpitchTo", "-1")
+        note_el.set("hopo",           "0")
+        note_el.set("harmonicPinch",  "0")
+        note_el.set("rightHand",      "-1")
+        note_el.set("tapStyle",       "0")
+        note_el.set("pickDirection",  "0")
 
-    ET.SubElement(root, "events",      count="0")
-    ET.SubElement(root, "toneChanges", count="0")
-    ET.SubElement(root, "controls",    count="0")
+    ET.SubElement(level_el, "chords", count="0")
 
-    # ── LEVELS ────────────────────────────────────────────────────────────
-    levels_notes = generate_levels(rs_notes)
-    levels_el    = ET.SubElement(root, "levels", count=str(len(levels_notes)))
+    anchors_data = smooth_anchors(rs_notes)
+    anchors_el   = ET.SubElement(level_el, "anchors", count=str(len(anchors_data)))
+    for t, f in anchors_data:
+        ET.SubElement(anchors_el, "anchor", time=f"{t:.3f}", fret=str(f), width="4")
 
-    for diff, notes in enumerate(levels_notes):
-        level_el = ET.SubElement(levels_el, "level", difficulty=str(diff))
-        notes_el = ET.SubElement(level_el,  "notes", count=str(len(notes)))
-
-        for n in notes:
-            note_el = ET.SubElement(notes_el, "note")
-            note_el.set("time",           f"{n.time:.3f}")
-            note_el.set("string",         str(n.string))
-            note_el.set("fret",           str(n.fret))
-            note_el.set("sustain",        f"{n.sustain:.3f}")
-            note_el.set("hammerOn",       "1" if n.hammer_on else "0")
-            note_el.set("pullOff",        "1" if n.pull_off  else "0")
-            note_el.set("vibrato",        "1" if n.vibrato   else "0")
-            note_el.set("slideTo",        str(n.slide_to))
-            note_el.set("bend",           f"{n.bend:.1f}")
-            note_el.set("linkNext",       "0")
-            note_el.set("accent",         "0")
-            note_el.set("harmonic",       "0")
-            note_el.set("ignore",         "0")
-            note_el.set("mute",           "0")
-            note_el.set("palmMute",       "0")
-            note_el.set("pluck",          "-1")
-            note_el.set("slap",           "-1")
-            note_el.set("slideUnpitchTo", "-1")
-            note_el.set("hopo",           "0")
-            note_el.set("harmonicPinch",  "0")
-            note_el.set("rightHand",      "-1")
-            note_el.set("tapStyle",       "0")
-            note_el.set("pickDirection",  "0")
-
-            if n.bend_values:
-                bvs_el = ET.SubElement(note_el, "bendValues")
-                for bv in n.bend_values:
-                    bv_el = ET.SubElement(bvs_el, "bendValue")
-                    bv_el.set("time", f"{bv['time']:.3f}")
-                    bv_el.set("step", f"{bv['step']:.1f}")
-
-        ET.SubElement(level_el, "chords",           count="0")
-
-        anchors_data = smooth_anchors(notes)
-        anchors_el   = ET.SubElement(level_el, "anchors", count=str(len(anchors_data)))
-        for t, f in anchors_data:
-            ET.SubElement(anchors_el, "anchor",
-                          time=f"{t:.3f}", fret=str(f), width="4")
-
-        ET.SubElement(level_el, "anchorExtensions", count="0")
-        ET.SubElement(level_el, "handShapes",       count="0")
-        ET.SubElement(level_el, "fingerprints",     count="0")
+    ET.SubElement(level_el, "anchorExtensions", count="0")
+    ET.SubElement(level_el, "handShapes",       count="0")
+    ET.SubElement(level_el, "fingerprints",     count="0")
 
     tree = ET.ElementTree(root)
     ET.indent(tree)
     tree.write(output_path, encoding="utf-8", xml_declaration=True)
 
 
-# ── HELPERS ───────────────────────────────────────────────────────────────────
-
 def _generate_ebeats(ebeats_el, song_length: float, avg_tempo: float) -> list[float]:
-    """
-    Generate ebeats at a constant tempo.
-    Returns list of bar start times (downbeats) for phrase segmentation.
-    """
     beat_dur   = 60.0 / avg_tempo
     t          = 0.0
     beat       = 0
@@ -250,6 +216,7 @@ def _generate_ebeats(ebeats_el, song_length: float, avg_tempo: float) -> list[fl
         t    += beat_dur
         beat += 1
 
+    ebeats_el.set("count", str(beat))
     return bar_starts
 
 

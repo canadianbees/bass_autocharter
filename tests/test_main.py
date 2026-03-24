@@ -48,7 +48,7 @@ if __name__ == "__main__":
     # ── 2. TRANSCRIPTION ───────────────────────────────────────────────────
     print("\n2. Transcribing with aubio...")
     # Returns list of (start_sec, end_sec, midi_pitch) tuples
-    raw_notes = transcribe_bass(bass_wav, str(midi_path))
+    raw_notes = transcribe_bass(bass_wav, str(midi_path), full_mix_wav)
     print(f"   Raw notes detected: {len(raw_notes)}")
 
     # ── 3. POSTPROCESS ─────────────────────────────────────────────────────
