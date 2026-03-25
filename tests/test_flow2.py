@@ -5,6 +5,8 @@
 import sys
 from pathlib import Path
 
+from src.gp_input_rhythmic import load_gp_notes_units
+
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 
 GP_FILE    = r"C:\Users\Celina Alzenor\Desktop\Projects\bass_autocharter\test_input\Ariana Grande-_don't wanna break up again_ (A MAJOR)-05-16-2025.gp"
@@ -30,7 +32,7 @@ if __name__ == '__main__':
     print('\n========== FLOW 2: GP → ROCKSMITH ==========\n')
 
     # 1. Load notes directly from GP file — no postprocessing
-    notes, fretting, tuning = load_gp_notes(GP_FILE, track_index=TRACK_IDX)
+    notes, fretting, tuning = load_gp_notes_units(GP_FILE, track_index=TRACK_IDX)
     print(f'Loaded {len(notes)} notes  ({notes[0][0]:.2f}s — {notes[-1][1]:.2f}s)')
 
     # 2. Convert to RS format and write XML
